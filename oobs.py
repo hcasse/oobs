@@ -9,6 +9,31 @@ import time
 import shutil
 import subprocess
 import sys
+import traceback
+
+# ANSI coloration
+PLAIN = "\033[0m"
+BOLD = "\033[1m"
+FAINT = "\033[2m"
+ITALIC = "\033[3m"
+UNDERLINE = "\033[4m"
+BLACK = "\033[30m"
+RED = "\033[31m"
+GREEN = "\033[32m"
+YELLOW = "\033[33m"
+BLUE = "\033[34m"
+MAGENTA = "\033[35m"
+CYAN = "\033[36m"
+WHITE = "\033[37m"
+BACK_BLACK = "\033[40m"
+BACK_RED = "\033[41m"
+BACK_GREEN = "\033[42m"
+BACK_YELLOW = "\033[43m"
+BACK_BLUE = "\033[44m"
+BACK_MAGENTA = "\033[45m"
+BACK_CYAN = "\033[46m"
+BACK_WHITE = "\033[47m"
+
 
 class Block:
 
@@ -62,12 +87,13 @@ class Program:
 	def cfg(self, id):
 		return self.cfg_map[id]
 
-
 class State:
 
-	def __init__(self, value, gen, next = None):
-		self.value = value
+	def __init__(self, id, type, gen, value, next = None):
+		self.id = id
+		self.type = type
 		self.gen = gen
+		self.value = value
 		self.next = next
 
 	def __str__(self):
@@ -89,9 +115,44 @@ class State:
 			ndif = abs(cur.gen - gen)
 			if ndif < dif:
 				bst = cur
+			cur = cur.next
 		return bst
 
-EMPTY_STATE = State(None, 0)
+	def before(self, gen):
+		cur = self
+		while cur.gen > gen:
+			if cur.next == None:
+				return cur
+			else:
+				cur = cur.next
+		return cur
+
+	def after(self, gen):
+		cur = self
+		while cur.next != None and cur.next.gen > gen:
+			cur = cur.next
+		return cur
+
+	def youngest(self, gen):
+		return self
+
+	def oldest(self, gen):
+		cur = self
+		while cur.next != None:
+			cur = cur.next
+		return cur
+
+	def all(self):
+		"""Get all states: this one and younger ones."""
+		res = []
+		cur = self
+		while cur != None:
+			res.append(cur)
+			cur = cur.next
+		return res
+
+
+EMPTY_STATE = State(-1, "in", -1, None)
 
 
 def load(file):
@@ -136,11 +197,12 @@ def load(file):
 	gen = 0
 	for jst in js["analysis"]:
 		id = jst["id"]
+		type = jst["type"]
 		try:
-			next = states[id]
+			next = states[(id, type)]
 		except KeyError:
 			next = None
-		states[(id, jst["type"])] = State(jst["state"], gen, next)
+		states[(id, type)] = State(id, type, gen, jst["state"], next)
 		gen = gen + 1
 
 	# return result
@@ -185,7 +247,7 @@ def gen_dots(program):
 			else:
 				out.write("label=<<TABLE BORDER=\"0\"><TR><TD><B>%s [%d]</B></TD></TR><HR/><TR><TD ALIGN=\"left\">%s<BR ALIGN=\"left\"/></TD></TR></TABLE>>" % (
 					v.title, v.id,
-					"<BR ALIGN=\"left\"/>".join([escape_code(c) for c in v.code])
+					"<BR ALIGN=\"left\"/>".join([escape_code(c) for c in v.code if not c.startswith("\t")])
 				))
 				out.write(", shape=Mrecord")
 			out.write("];\n")
@@ -219,6 +281,11 @@ class CLI:
 d		Displayed detailed code.
 gID		Change the current block.
 h, ?	Display help message.
+H		Display history of current BB.
+H^		Display history of input of current BB.
+H$		Display history of output of current BB.
+s^		Display state of predecessors.
+s$		Display state of successors
 q		Quit.
 """)
 		return False
@@ -231,22 +298,24 @@ q		Quit.
 
 	def display(self):
 		for e in self.bb.preds:
-			self.out.write("[%s - %d] " % (e.src.title, e.src.id))
+			self.out.write((BACK_BLUE + WHITE + "[%s - %d]" + PLAIN + " ") % (e.src.title, e.src.id))
 		self.out.write("\n")
-		self.out.write("IN: %s\n" % self.istate)
-		self.out.write("%s [%d] (%d/%d)\n" % (
+		self.out.write((BOLD + RED + "IN: " + PLAIN + ITALIC + "%s\n" + PLAIN) % self.istate)
+		self.out.write((BOLD + "%s [%d] (%d/%d)\n" + PLAIN) % (
 			self.bb.title,
 			self.bb.id,
 			self.istate.count() - 1,
 			self.total(self.bb.id, "in")
 		))
 		if self.bb.code != None:
+			self.out.write(CYAN)
 			for c in self.bb.code:
 				if not self.compact or not c.startswith("\t"):
 					self.out.write("\t%s\n" % c)
-		self.out.write("OUT: %s\n" % self.ostate)
+			self.out.write(PLAIN)
+		self.out.write((BOLD + RED + "OUT: " + PLAIN + ITALIC + "%s\n" + PLAIN) % self.ostate)
 		for e in self.bb.succs:
-			self.out.write("[%s - %d] " % (e.snk.title, e.snk.id))
+			self.out.write((BACK_BLUE + WHITE + "[%s - %d]" + PLAIN + " ") % (e.snk.title, e.snk.id))
 		self.out.write("\n")			
 
 	def details(self, args):
@@ -257,23 +326,23 @@ q		Quit.
 		self.compact = old
 		return False
 
-	def set_bb(self, bb):
+	def state_of(self, bb, type):
+		try:
+			return self.states[(bb.id, type)]
+		except KeyError:
+			return EMPTY_STATE
+
+	def set_bb(self, bb, gen, policy = State.youngest):
 		"""Set the new current BB."""
 		self.bb = bb
-		try:
-			self.istate = self.states[(bb.id, "in")].closest(self.istate.gen)
-		except KeyError:
-			self.istate = EMPTY_STATE
-		try:
-			self.ostate = self.states[(bb.id, "out")].closest(self.ostate.gen)
-		except KeyError as e:
-			self.ostate = EMPTY_STATE
+		self.istate = policy(self.state_of(bb, "in"), gen)
+		self.ostate = policy(self.state_of(bb, "out"), gen)
 
 	def go(self, args):
 		"""Change the current block."""
 		try:
 			id = int(args)
-			self.set_bb(self.program.block_map[id])
+			self.set_bb(self.program.block_map[id], self.istate.gen)
 			return True
 		except ValueError:
 			self.out.write("ERROR: argument should be an ID!\n")
@@ -282,12 +351,51 @@ q		Quit.
 			self.out.write("ERROR: bad block ID: %s\n" % args)
 			return False
 
+	def state(self, args):
+		"""Display state."""
+		if args == "^":
+			for v in [e.src for e in self.bb.preds]:
+				self.display_state(self.state_of(v, "in").before(self.istate.gen))
+		elif args == "$":
+			for v in [e.snk for e in self.bb.succs]:
+				self.display_state(self.state_of(v, "out").after(self.istate.gen))
+		else:
+			self.out.write("ERROR: command s does not support %s\n" % args)
+		return False
+
+	def display_state(self, s):
+		self.out.write((RED + BOLD + "%s: " + PLAIN + "%s [%d] (%d)\n") % (
+			s.type,
+			self.program.block_map[s.id].title,
+			s.id,
+			s.gen
+		))
+		self.out.write((ITALIC + "%s\n" + PLAIN) % s.value)
+
+	def history(self, args):
+		"""Display history of the current block."""
+		if args == "":
+			ss = self.istate.all() + self.ostate.all()
+		elif args == "^":
+			ss = self.istate.all()
+		elif args == "$":
+			ss = self.ostate.all()
+		else:
+			self.out.write("ERROR: unsupported arguments: %d\n" % args)
+			return False
+		ss.sort(key=lambda x: x.gen)
+		for s in ss:
+			self.display_state(s)
+		return False
+
 	def __init__(self, program, states):
 		self.cmds = {
 			"d": self.details,
 			"g": self.go,
 			"h": self.help,
+			"H": self.history,
 			"q": self.quit,
+			"s": self.state,
 			"?": self.help
 		}
 
@@ -296,10 +404,9 @@ q		Quit.
 		self.program = program
 		self.states = states
 		self.done = False
-		self.bb = program.cfgs[0].blocks[1]
-		self.istate = states[(self.bb.id, "in")]
-		self.ostate = states[(self.bb.id, "out")]
 		self.compact = True
+		bb = program.cfgs[0].blocks[1]
+		self.set_bb(bb, self.states[(bb.id, "in")].gen)
 
 		# main loop
 		self.display()
@@ -314,6 +421,7 @@ q		Quit.
 				except KeyError:
 					self.out.write("ERROR: unknown commande: %s\n" % cmd)
 			except (KeyboardInterrupt, EOFError):
+				#traceback.print_exc()
 				self.quit("")
 
 
