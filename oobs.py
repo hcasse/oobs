@@ -80,7 +80,19 @@ class State:
 			cnt = cnt + 1
 			cur = cur.next
 		return cnt
-	
+
+	def closest(self, gen):
+		bst = self
+		dif = abs(self.gen - gen)
+		cur = self.next
+		while cur != None:
+			ndif = abs(cur.gen - gen)
+			if ndif < dif:
+				bst = cur
+		return bst
+
+EMPTY_STATE = State(None, 0)
+
 
 def load(file):
 	"""Load a trace file. Return (program, state map)"""
@@ -204,10 +216,18 @@ class CLI:
 	def help(self, args):
 		self.out.write(
 """Commands:
-h, ?  Display help message.
-q     Quit.
+d		Displayed detailed code.
+gID		Change the current block.
+h, ?	Display help message.
+q		Quit.
 """)
 		return False
+
+	def total(self, id, type):
+		try:
+			return self.states[(self.bb.id, type)].count()
+		except KeyError:
+			return 0
 
 	def display(self):
 		for e in self.bb.preds:
@@ -218,9 +238,9 @@ q     Quit.
 			self.bb.title,
 			self.bb.id,
 			self.istate.count() - 1,
-			self.states[(self.bb.id, "in")].count()
+			self.total(self.bb.id, "in")
 		))
-		if self.bb.code:
+		if self.bb.code != None:
 			for c in self.bb.code:
 				if not self.compact or not c.startswith("\t"):
 					self.out.write("\t%s\n" % c)
@@ -237,9 +257,35 @@ q     Quit.
 		self.compact = old
 		return False
 
+	def set_bb(self, bb):
+		"""Set the new current BB."""
+		self.bb = bb
+		try:
+			self.istate = self.states[(bb.id, "in")].closest(self.istate.gen)
+		except KeyError:
+			self.istate = EMPTY_STATE
+		try:
+			self.ostate = self.states[(bb.id, "out")].closest(self.ostate.gen)
+		except KeyError as e:
+			self.ostate = EMPTY_STATE
+
+	def go(self, args):
+		"""Change the current block."""
+		try:
+			id = int(args)
+			self.set_bb(self.program.block_map[id])
+			return True
+		except ValueError:
+			self.out.write("ERROR: argument should be an ID!\n")
+			return False
+		except KeyError:
+			self.out.write("ERROR: bad block ID: %s\n" % args)
+			return False
+
 	def __init__(self, program, states):
 		self.cmds = {
 			"d": self.details,
+			"g": self.go,
 			"h": self.help,
 			"q": self.quit,
 			"?": self.help
@@ -264,7 +310,7 @@ q     Quit.
 					continue
 				try:
 					if self.cmds[cmd[0]](cmd[1:]):
-						display()
+						self.display()
 				except KeyError:
 					self.out.write("ERROR: unknown commande: %s\n" % cmd)
 			except (KeyboardInterrupt, EOFError):
