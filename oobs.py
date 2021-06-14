@@ -35,6 +35,75 @@ BACK_CYAN = "\033[46m"
 BACK_WHITE = "\033[47m"
 
 
+class State:
+
+	def __init__(self, id, type, value, next = None):
+		self.id = id
+		self.type = type
+		self.gen = -1
+		self.value = value
+		self.next = next
+
+	def __str__(self):
+		return "%s" % self.value
+
+	def is_end(self):
+		return self.gen == -1
+
+	def count(self):
+		cnt = 0
+		cur = self
+		while not cur.is_end():
+			cnt = cnt + 1
+			cur = cur.next
+		return cnt
+
+	def closest(self, gen):
+		bst = self
+		dif = abs(self.gen - gen)
+		cur = self.next
+		while not cur.is_end():
+			ndif = abs(cur.gen - gen)
+			if ndif < dif:
+				bst = cur
+			cur = cur.next
+		return bst
+
+	def before(self, gen):
+		cur = self
+		while not cur.is_end() and cur.gen >= gen:
+			cur = cur.next
+		return cur
+
+	def after(self, gen):
+		cur = self
+		while cur.next.is_end() and cur.next.gen > gen:
+			cur = cur.next
+		return cur
+
+	def youngest(self, gen):
+		return self
+
+	def oldest(self, gen):
+		cur = self
+		last = self
+		while not cur.is_end():
+			last = cur
+			cur = cur.next
+		return last
+
+	def all(self):
+		"""Get all states: this one and younger ones."""
+		res = []
+		cur = self
+		while not cur.is_end():
+			res.append(cur)
+			cur = cur.next
+		return res
+
+EMPTY_STATE = State(-1, "in", None)
+
+
 class Block:
 
 	def __init__(self, title, id, code = None, to = None):
@@ -87,76 +156,48 @@ class Program:
 	def cfg(self, id):
 		return self.cfg_map[id]
 
-class State:
 
-	def __init__(self, id, type, gen, value, next = None):
-		self.id = id
-		self.type = type
-		self.gen = gen
-		self.value = value
-		self.next = next
+class Analysis:
+	"""A comlete analysis including program, states and block-state map."""
 
-	def __str__(self):
-		return "%s" % self.value
+	def __init__(self, program):
 
-	def count(self):
-		cnt = 0
-		cur = self
-		while cur != None:
-			cnt = cnt + 1
-			cur = cur.next
-		return cnt
+		# initialize the structure
+		self.program = program
+		self.sequence = []
+		self.gen = 0
 
-	def closest(self, gen):
-		bst = self
-		dif = abs(self.gen - gen)
-		cur = self.next
-		while cur != None:
-			ndif = abs(cur.gen - gen)
-			if ndif < dif:
-				bst = cur
-			cur = cur.next
-		return bst
+		# initialize the map
+		self.map = {}
+		for g in program.cfgs:
+			for v in g.blocks:
+				self.map[(v.id, "in")] = State(v.id, "in", -1, None)
+				self.map[(v.id, "out")] = State(v.id, "out", -1, None)
+	
+	def block(self, id):
+		"""Get the first block."""
+		return self.program.block(id)
 
-	def before(self, gen):
-		cur = self
-		while cur.gen > gen:
-			if cur.next == None:
-				return cur
-			else:
-				cur = cur.next
-		return cur
+	def first(self):
+		"""Get the first block."""
+		return self.program.cfgs[0].blocks[1]
 
-	def after(self, gen):
-		cur = self
-		while cur.next != None and cur.next.gen > gen:
-			cur = cur.next
-		return cur
+	def state(self, block, type):
+		"""Get the yougest state for the given block."""
+		return self.map[(block.id, type)]
 
-	def youngest(self, gen):
-		return self
-
-	def oldest(self, gen):
-		cur = self
-		while cur.next != None:
-			cur = cur.next
-		return cur
-
-	def all(self):
-		"""Get all states: this one and younger ones."""
-		res = []
-		cur = self
-		while cur != None:
-			res.append(cur)
-			cur = cur.next
-		return res
-
-
-EMPTY_STATE = State(-1, "in", -1, None)
-
+	def add(self, state):
+		"""Add a state to the analysis.
+		States must be added in their ocurrrence orders!"""
+		state.next = self.map[(state.id, state.type)]
+		self.map[(state.id, state.type)] = state
+		state.gen = self.gen
+		self.gen = self.gen + 1
+		self.sequence.append(state)
+	
 
 def load(file):
-	"""Load a trace file. Return (program, state map)"""
+	"""Load a trace file. Return an Analysis."""
 	js = json.load(file)
 
 	# load CFG
@@ -193,20 +234,12 @@ def load(file):
 				v.to = program.cfg_map[v.to]
 
 	# load the states
-	states = { }
-	gen = 0
+	ana = Analysis(program)
 	for jst in js["analysis"]:
-		id = jst["id"]
-		type = jst["type"]
-		try:
-			next = states[(id, type)]
-		except KeyError:
-			next = None
-		states[(id, type)] = State(id, type, gen, jst["state"], next)
-		gen = gen + 1
+		ana.add(State(jst["id"], jst["type"], jst["state"]))
 
 	# return result
-	return (program, states)
+	return ana
 
 
 def gen_dots(program):
@@ -278,6 +311,11 @@ class CLI:
 	def help(self, args):
 		self.out.write(
 """Commands:
+!		Re-display current block.
+a<		Age before.
+a>		Age after.
+a<<		Youngest age.
+a>>		Oldest age.
 d		Displayed detailed code.
 gID		Change the current block.
 h, ?	Display help message.
@@ -290,12 +328,6 @@ q		Quit.
 """)
 		return False
 
-	def total(self, id, type):
-		try:
-			return self.states[(self.bb.id, type)].count()
-		except KeyError:
-			return 0
-
 	def display(self):
 		for e in self.bb.preds:
 			self.out.write((BACK_BLUE + WHITE + "[%s - %d]" + PLAIN + " ") % (e.src.title, e.src.id))
@@ -304,8 +336,8 @@ q		Quit.
 		self.out.write((BOLD + "%s [%d] (%d/%d)\n" + PLAIN) % (
 			self.bb.title,
 			self.bb.id,
-			self.istate.count() - 1,
-			self.total(self.bb.id, "in")
+			self.istate.count()-1,
+			self.ana.state(self.bb, "in").count()
 		))
 		if self.bb.code != None:
 			self.out.write(CYAN)
@@ -326,23 +358,17 @@ q		Quit.
 		self.compact = old
 		return False
 
-	def state_of(self, bb, type):
-		try:
-			return self.states[(bb.id, type)]
-		except KeyError:
-			return EMPTY_STATE
-
 	def set_bb(self, bb, gen, policy = State.youngest):
 		"""Set the new current BB."""
 		self.bb = bb
-		self.istate = policy(self.state_of(bb, "in"), gen)
-		self.ostate = policy(self.state_of(bb, "out"), gen)
+		self.istate = policy(self.ana.state(bb, "in"), gen)
+		self.ostate = State.after(self.ana.state(bb, "out"), self.istate.gen)
 
 	def go(self, args):
 		"""Change the current block."""
 		try:
 			id = int(args)
-			self.set_bb(self.program.block_map[id], self.istate.gen)
+			self.set_bb(self.ana.block(id), self.istate.gen)
 			return True
 		except ValueError:
 			self.out.write("ERROR: argument should be an ID!\n")
@@ -355,10 +381,10 @@ q		Quit.
 		"""Display state."""
 		if args == "^":
 			for v in [e.src for e in self.bb.preds]:
-				self.display_state(self.state_of(v, "in").before(self.istate.gen))
+				self.display_state(self.ana.state(v, "out").before(self.istate.gen))
 		elif args == "$":
 			for v in [e.snk for e in self.bb.succs]:
-				self.display_state(self.state_of(v, "out").after(self.istate.gen))
+				self.display_state(self.ana.state(v, "in").after(self.istate.gen))
 		else:
 			self.out.write("ERROR: command s does not support %s\n" % args)
 		return False
@@ -366,7 +392,7 @@ q		Quit.
 	def display_state(self, s):
 		self.out.write((RED + BOLD + "%s: " + PLAIN + "%s [%d] (%d)\n") % (
 			s.type,
-			self.program.block_map[s.id].title,
+			self.ana.block(s.id).title,
 			s.id,
 			s.gen
 		))
@@ -388,25 +414,44 @@ q		Quit.
 			self.display_state(s)
 		return False
 
-	def __init__(self, program, states):
+	def age(self, args):
+		"""Select the current age."""
+		if args == "<":
+			self.set_bb(self.bb, self.istate.gen, State.before)
+		elif args == ">":
+			self.set_bb(self.bb, self.istate.gen, State.after)
+		elif args == "<<":
+			self.set_bb(self.bb, self.istate.gen, State.oldest)
+		elif args == ">>":
+			self.set_bb(self.bb, self.istate.gen, State.youngest)
+		else:
+			self.out.write("ERROR: unsupported argument: %s\n" % args)
+			return False
+		return True
+
+	def redisplay(self, args):
+		return True
+
+	def __init__(self, ana):
 		self.cmds = {
+			"a": self.age,
 			"d": self.details,
 			"g": self.go,
 			"h": self.help,
 			"H": self.history,
 			"q": self.quit,
 			"s": self.state,
-			"?": self.help
+			"?": self.help,
+			"!": self.redisplay
 		}
 
 		# initialization
 		self.out = sys.stdout
-		self.program = program
-		self.states = states
+		self.ana = ana
 		self.done = False
 		self.compact = True
-		bb = program.cfgs[0].blocks[1]
-		self.set_bb(bb, self.states[(bb.id, "in")].gen)
+		bb = ana.first()
+		self.set_bb(bb, ana.state(bb, "in").gen)
 
 		# main loop
 		self.display()
@@ -416,10 +461,12 @@ q		Quit.
 				if cmd == "":
 					continue
 				try:
-					if self.cmds[cmd[0]](cmd[1:]):
-						self.display()
+					f = self.cmds[cmd[0]]
 				except KeyError:
 					self.out.write("ERROR: unknown commande: %s\n" % cmd)
+					continue
+				if f(cmd[1:]):
+					self.display()
 			except (KeyboardInterrupt, EOFError):
 				#traceback.print_exc()
 				self.quit("")
@@ -438,11 +485,11 @@ def main():
 	args = parser.parse_args()
 
 	# load the trace
-	(program, states) = load(args.trace)
+	ana = load(args.trace)
 
 	# display the CFGs
 	if args.xdot:
-		path = gen_dots(program)
+		path = gen_dots(ana.program)
 		proc = subprocess.Popen(
 			"otawa-xdot.py %s" % path,
 			shell=True,
@@ -450,7 +497,7 @@ def main():
 			stderr=subprocess.DEVNULL)
 
 	# wait for command until interrupted
-	CLI(program, states)
+	CLI(ana)
 
 	# cleanup all
 	if args.xdot:
